@@ -1,273 +1,170 @@
-build/
-build-mac/
-test-output/
-.DS_Store
-*.zip
+name: Build plugin
 
-#!/bin/bash
-# Сборка SAFE-SIDE на Mac одной командой:
-#   cd путь/к/SAFE-SIDE && bash build_mac.sh
-# Плагины сами попадут в ~/Library/Audio/Plug-Ins/VST3 и ~/Library/Audio/Plug-Ins/Components
-set -e
-cd "$(dirname "$0")"
+# Every push to main builds macOS (VST3 + AU, Apple Silicon + Intel) and Windows (VST3),
+# runs the mono-contract test, builds the installers and publishes the GitHub Release
+# v<VERSION from CMakeLists.txt>, so the Releases page always has the newest build.
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
 
-echo "==> Проверяю инструменты"
-if ! xcode-select -p >/dev/null 2>&1; then
-    echo "Нужны Xcode Command Line Tools. Сейчас откроется установщик —"
-    echo "после установки запусти этот скрипт ещё раз."
-    xcode-select --install
-    exit 1
-fi
+permissions:
+  contents: write
 
-if ! command -v cmake >/dev/null 2>&1; then
-    if command -v brew >/dev/null 2>&1; then
-        echo "==> Ставлю cmake через Homebrew"
-        brew install cmake
-    else
-        echo "==> Ставлю cmake через pip"
-        python3 -m pip install --user --quiet cmake
-        export PATH="$(python3 -m site --user-base)/bin:$PATH"
-    fi
-fi
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
 
-echo "==> Настраиваю проект (первый раз скачается JUCE, ~1-2 мин)"
-cmake -S . -B build-mac -DCMAKE_BUILD_TYPE=Release
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
 
-echo "==> Собираю (несколько минут)"
-cmake --build build-mac --config Release -j"$(sysctl -n hw.ncpu)"
+      - name: Build
+        run: cmake --build build --config Release -j4
 
-VST3="$HOME/Library/Audio/Plug-Ins/VST3/SAFE-SIDE.vst3"
-AU="$HOME/Library/Audio/Plug-Ins/Components/SAFE-SIDE.component"
+      - name: Mono-contract test
+        run: ./build/SafeSideContractTest
 
-echo "==> Подписываю (ad-hoc), чтобы macOS разрешила загрузку"
-for p in "$VST3" "$AU"; do
-    if [ -d "$p" ]; then
-        xattr -cr "$p" || true
-        codesign --force --deep --sign - "$p"
-    fi
-done
-killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+      - name: Package
+        run: |
+          D="dist/SAFE-SIDE (Mac)"
+          mkdir -p "$D"
+          cp -R "build/SafeSide_artefacts/Release/VST3/SAFE-SIDE.vst3" "$D/"
+          cp -R "build/SafeSide_artefacts/Release/AU/SAFE-SIDE.component" "$D/"
+          for p in "$D"/*.vst3 "$D"/*.component; do codesign --force --deep --sign - "$p"; done
+          cp install_mac.command "$D/"
+          chmod +x "$D/install_mac.command"
+          cp docs/INSTALL.txt "$D/README.txt"
+          cd dist && ditto -c -k --keepParent "SAFE-SIDE (Mac)" BOBA-SafeSide-macOS.zip
 
-echo ""
-echo "Готово!"
-echo "  VST3: $VST3"
-echo "  AU:   $AU"
-echo "Открой Ableton -> Settings -> Plug-ins -> включи 'Use VST3 Plug-in System Folders' -> Rescan."
+      - name: Installer (.pkg)
+        run: |
+          V=$(grep -Eo 'project\(SafeSide VERSION [0-9.]+' CMakeLists.txt | awk '{print $3}')
+          bash installer/mac/build_pkg.sh "dist/SAFE-SIDE (Mac)" "$V" "dist/BOBA-SafeSide-$V-Mac-Installer.pkg"
 
-cmake_minimum_required(VERSION 3.22)
+      - name: Test the installer
+        run: |
+          PKG=$(ls dist/*-Mac-Installer.pkg)
+          sudo installer -pkg "$PKG" -target /
+          test -f "/Library/Audio/Plug-Ins/VST3/SAFE-SIDE.vst3/Contents/MacOS/SAFE-SIDE"
+          test -f "/Library/Audio/Plug-Ins/Components/SAFE-SIDE.component/Contents/MacOS/SAFE-SIDE"
+          pkgutil --pkgs | grep com.boba.safeside
+          codesign --verify --deep "/Library/Audio/Plug-Ins/VST3/SAFE-SIDE.vst3"
+          echo "installed OK"
 
-project(SafeSide VERSION 2.0.0 LANGUAGES C CXX)
+      - name: Validate the Audio Unit (auval)
+        continue-on-error: true
+        run: auval -v aufx SfS2 Boba | tail -25
 
-set(CMAKE_CXX_STANDARD 17)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BOBA-SafeSide-macOS
+          path: |
+            dist/BOBA-SafeSide-macOS.zip
+            dist/*-Mac-Installer.pkg
 
-# On Mac build a universal binary (Apple Silicon + Intel) that runs on macOS 11+
-if(APPLE)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "" FORCE)
-    if(NOT CMAKE_OSX_ARCHITECTURES)
-        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
-    endif()
-endif()
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
 
-# ---- Mono-contract test of the DSP engine (pure C++, no JUCE) ---------------
-add_executable(SafeSideContractTest tests/contract_test.cpp)
-add_executable(SafeSideRender tests/render.cpp)
-enable_testing()
-add_test(NAME mono_contract COMMAND SafeSideContractTest)
-option(SS_ONLY_TESTS "Configure only the DSP tests (no JUCE download)" OFF)
-if(SS_ONLY_TESTS)
-    return()
-endif()
+      - name: Configure
+        run: cmake -S . -B build -A x64
 
-# ---- JUCE ------------------------------------------------------------------
-# Use a local JUCE checkout if JUCE_DIR is given, otherwise download it.
-if(DEFINED JUCE_DIR)
-    add_subdirectory(${JUCE_DIR} JUCE EXCLUDE_FROM_ALL)
-else()
-    include(FetchContent)
-    FetchContent_Declare(JUCE
-        GIT_REPOSITORY https://github.com/juce-framework/JUCE.git
-        GIT_TAG        8.0.9
-        GIT_SHALLOW    TRUE)
-    FetchContent_MakeAvailable(JUCE)
-endif()
+      - name: Build
+        run: cmake --build build --config Release -j4
 
-# ---- Plugin ----------------------------------------------------------------
-if(APPLE)
-    set(SS_FORMATS VST3 AU)
-    set(SS_COPY TRUE)      # installs into ~/Library/Audio/Plug-Ins after building
-else()
-    set(SS_FORMATS VST3)
-    set(SS_COPY FALSE)
-endif()
+      - name: Mono-contract test
+        run: build\Release\SafeSideContractTest.exe
 
-juce_add_plugin(SafeSide
-    COMPANY_NAME                "BOBA"
-    PLUGIN_MANUFACTURER_CODE    Boba
-    PLUGIN_CODE                 SfS2
-    PRODUCT_NAME                "SAFE-SIDE"
-    DESCRIPTION                 "Mono-safe stereo widener with six width characters"
-    FORMATS                     ${SS_FORMATS}
-    IS_SYNTH                    FALSE
-    NEEDS_MIDI_INPUT            FALSE
-    NEEDS_MIDI_OUTPUT           FALSE
-    IS_MIDI_EFFECT              FALSE
-    EDITOR_WANTS_KEYBOARD_FOCUS FALSE
-    COPY_PLUGIN_AFTER_BUILD     ${SS_COPY}
-    VST3_CATEGORIES             Fx Spatial
-    AU_MAIN_TYPE                kAudioUnitType_Effect
-    BUNDLE_ID                   com.boba.safeside)
+      - name: Package
+        shell: pwsh
+        run: |
+          $d = "dist/SAFE-SIDE (Windows)"
+          New-Item -ItemType Directory -Force -Path $d | Out-Null
+          Copy-Item -Recurse "build/SafeSide_artefacts/Release/VST3/SAFE-SIDE.vst3" "$d/"
+          Copy-Item "docs/INSTALL.txt" "$d/README.txt"
+          Compress-Archive -Path $d -DestinationPath "dist/BOBA-SafeSide-Windows.zip"
 
-set(SS_SOURCES
-    Source/PluginProcessor.cpp
-    Source/PluginEditor.cpp)
+      - name: Installer (Setup.exe)
+        shell: pwsh
+        run: |
+          choco upgrade innosetup -y --no-progress | Out-Null
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          $v = (Select-String -Path CMakeLists.txt -Pattern 'project\(SafeSide VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          $src = (Resolve-Path "build/SafeSide_artefacts/Release/VST3").Path
+          $out = (Resolve-Path "dist").Path
+          & $iscc "/DAppVersion=$v" "/DSourceDir=$src" "/DOutDir=$out" "installer\windows\SafeSide.iss"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
-target_sources(SafeSide PRIVATE ${SS_SOURCES})
-target_include_directories(SafeSide PRIVATE Source)
+      - name: Test the installer
+        shell: pwsh
+        run: |
+          $setup = (Get-ChildItem dist/*-Windows-Setup.exe).FullName
+          Start-Process $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          $dll = "$env:CommonProgramFiles\VST3\SAFE-SIDE.vst3\Contents\x86_64-win\SAFE-SIDE.vst3"
+          if (-not (Test-Path $dll)) { Write-Error "not installed: $dll"; exit 1 }
+          $un = "$env:ProgramFiles\BOBA\SAFE-SIDE\unins000.exe"
+          if (-not (Test-Path $un)) { Write-Error "no uninstaller"; exit 1 }
+          Start-Process $un -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART' -Wait
+          Start-Sleep -Seconds 3
+          if (Test-Path $dll) { Write-Error "uninstall left the plug-in behind"; exit 1 }
+          Write-Host "install + uninstall OK"
 
-# Figtree font (SIL Open Font License) embedded as binary data
-juce_add_binary_data(SSBinaryData SOURCES
-    Resources/fonts/Figtree-Regular.ttf
-    Resources/fonts/Figtree-SemiBold.ttf
-    Resources/fonts/Figtree-Bold.ttf
-    Resources/fonts/Figtree-ExtraBold.ttf)
-set_target_properties(SSBinaryData PROPERTIES POSITION_INDEPENDENT_CODE ON)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BOBA-SafeSide-Windows
+          path: |
+            dist/BOBA-SafeSide-Windows.zip
+            dist/*-Windows-Setup.exe
 
-set(SS_DEFINITIONS
-    JUCE_WEB_BROWSER=0
-    JUCE_USE_CURL=0
-    JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_DISPLAY_SPLASH_SCREEN=0)
+  release:
+    if: github.event_name == 'push'
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
-if(UNIX AND NOT APPLE)
-    # keep the Linux build light (only used for testing)
-    list(APPEND SS_DEFINITIONS JUCE_USE_XRANDR=0 JUCE_USE_XINERAMA=0 JUCE_USE_XCURSOR=0)
-endif()
+      - name: Release tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            echo "name=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            V=$(grep -Eo 'project\(SafeSide VERSION [0-9.]+' CMakeLists.txt | awk '{print $3}')
+            echo "name=v$V" >> "$GITHUB_OUTPUT"
+          fi
 
-target_compile_definitions(SafeSide PUBLIC ${SS_DEFINITIONS})
-if(MSVC)
-    target_compile_options(SafeSide PRIVATE /utf-8)
-endif()
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
 
-target_link_libraries(SafeSide
-    PRIVATE
-        SSBinaryData
-        juce::juce_audio_processors
-        juce::juce_gui_basics
-    PUBLIC
-        juce::juce_recommended_config_flags
-        juce::juce_recommended_lto_flags
-        juce::juce_recommended_warning_flags)
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.name }}
+          target_commitish: ${{ github.sha }}
+          make_latest: true
+          name: BOBA SAFE-SIDE ${{ steps.tag.outputs.name }}
+          body: |
+            **BOBA · SAFE-SIDE** — стереорасширитель, который не крадёт моно. Шесть характеров ширины: AIR, PRISM, TWIN, SHINE, PHANTOM, SPACE.
+            *Stereo widener that never steals the mono. Six width characters.*
 
-# ---- UI snapshot (optional, renders the editor to a PNG) --------------------
-option(SS_BUILD_SNAPSHOT "Build the UI snapshot tool" OFF)
-if(SS_BUILD_SNAPSHOT)
-    juce_add_console_app(SafeSideSnapshot PRODUCT_NAME "SafeSideSnapshot")
-    target_sources(SafeSideSnapshot PRIVATE tests/ui_snapshot.cpp ${SS_SOURCES})
-    target_include_directories(SafeSideSnapshot PRIVATE Source)
-    target_compile_definitions(SafeSideSnapshot PRIVATE ${SS_DEFINITIONS}
-        JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1
-        JucePlugin_Name="SAFE-SIDE")
-    target_link_libraries(SafeSideSnapshot PRIVATE
-        SSBinaryData
-        juce::juce_audio_processors juce::juce_gui_basics
-        juce::juce_recommended_config_flags)
-endif()
+            ### Установщики / Installers
+            - **Mac** (Apple Silicon + Intel, VST3 + AU): `BOBA-SafeSide-…-Mac-Installer.pkg` → двойной клик → Продолжить → Установить.
+              Если macOS не даёт открыть: правый клик → Открыть. На macOS 15+: Системные настройки → Конфиденциальность и безопасность → «Всё равно открыть».
+              *If macOS blocks it: right-click → Open; on macOS 15+: System Settings → Privacy & Security → Open Anyway.*
+            - **Windows** (VST3, 64-bit): `BOBA-SafeSide-…-Windows-Setup.exe` → Далее → Установить. Если SmartScreen предупреждает: «Подробнее» → «Выполнить в любом случае».
+              *If SmartScreen warns: More info → Run anyway.*
 
-# ---- Host test (optional): loads the built VST3 like a DAW -------------------
-option(SS_BUILD_HOSTTEST "Build the VST3 host test" OFF)
-if(SS_BUILD_HOSTTEST)
-    juce_add_console_app(SafeSideHostTest PRODUCT_NAME "SafeSideHostTest")
-    target_sources(SafeSideHostTest PRIVATE tests/host_test.cpp)
-    target_compile_definitions(SafeSideHostTest PRIVATE ${SS_DEFINITIONS}
-        JUCE_PLUGINHOST_VST3=1 JUCE_STANDALONE_APPLICATION=1 JUCE_MODAL_LOOPS_PERMITTED=1)
-    target_link_libraries(SafeSideHostTest PRIVATE
-        juce::juce_audio_processors juce::juce_gui_basics juce::juce_recommended_config_flags)
-endif()
+            После установки пересканируй плагины в DAW: плагин появится у производителя **BOBA**.
+            *Rescan plug-ins in your DAW; SAFE-SIDE is listed under BOBA.*
 
-# SAFE-SIDE
-
-**BOBA** · стереорасширитель, который не крадёт моно
-
-Шесть характеров ширины — **AIR, PRISM, TWIN, SHINE, PHANTOM, SPACE** — и одно правило: вся ширина живёт только в боках, поэтому моно на выходе в точности равно моно на входе. Трек звучит широко в наушниках и не проваливается на телефоне, в клубе и в TikTok.
-VST3 + AU для macOS (Apple Silicon и Intel), VST3 для Windows.
-
-![SAFE-SIDE](docs/ui-main.png)
-
-## Скачать
-
-Готовые сборки лежат на странице **[Releases](../../releases)**:
-- **Mac** (Apple Silicon + Intel, VST3 + AU): `BOBA-SafeSide-<версия>-Mac-Installer.pkg` — двойной клик → Продолжить → Установить. Если macOS не даёт открыть: правый клик → Открыть (на macOS 15+: Настройки → Конфиденциальность и безопасность → «Всё равно открыть»).
-- **Windows** (VST3): `BOBA-SafeSide-<версия>-Windows-Setup.exe` — Далее → Установить. Если SmartScreen предупреждает: «Подробнее» → «Выполнить в любом случае».
-- Zip-архивы — тот же плагин для ручной установки (`install_mac.command` / копирование в `C:\Program Files\Common Files\VST3`).
-
-Потом пересканируй плагины в DAW — SAFE-SIDE появится у производителя **BOBA**. Полное руководство — [docs/MANUAL.md](docs/MANUAL.md).
-
-## Что умеет
-
-- **AIR** — мягкая диффузная ширина (декорреляция бархатным шумом), атаки остаются в центре.
-- **PRISM** — раскладывает звук по частотам: соседние полосы уходят в разные стороны, можно пустить их медленно плыть.
-- **TWIN** — дабл: два голоса плавают по времени, как плёнка.
-- **SHINE** — новые верхние гармоники: чётные слева, нечётные справа.
-- **PHANTOM** — ширина 808: саб остаётся в моно, его гармоники разлетаются по сторонам и привязаны по фазе к тем, что уже звучат.
-- **SPACE** — ранние отражения комнаты для глубины без ревёрберного хвоста.
-- **AMOUNT / COLOR** — сколько и какой ширины (COLOR у каждого характера свой: SIZE, MOTION, DRIFT, TONE, RANGE, ROOM).
-- **WIDTH** — усилить или сузить стерео, которое уже есть в треке (0–200 %).
-- **MONO KEEP** — подмешать часть ширины и в моно, чтобы трек был плотнее на телефоне. Подмешивается только то, что не может погасить звук, и каждая добавка проверяется по полосам и во времени: она может только прибавить.
-- **Mono Guard** — **MONO BELOW** (саб и 808 в моно), **MONO SAFETY** (стерео не громче моно больше чем на 1,5 дБ в каждой полосе), **TRANSIENT** (атаки сухие).
-- **Панель проверки** — корреляция, «стерео громче моно» по полосам и живое сравнение моно на выходе со входом: **IDENTICAL**.
-- **MONO CHECK / SIDE SOLO**, подсказки на русском (наведи мышь на ручку).
-
-| PHANTOM + MONO KEEP | PRISM |
-|---|---|
-| ![](docs/ui-phantom-keep.png) | ![](docs/ui-prism.png) |
-
-## Проверено цифрами
-
-На тестовом бите 140 BPM (808, бочка, хэты, пэд, плак, вокал):
-
-| | SAFE-SIDE, MONO KEEP 0 | SAFE-SIDE, MONO KEEP 100 % | Haas 12 мс |
-|---|---|---|---|
-| Моно выход vs вход | совпадает (−327 дБ, числовой шум) | только прибавляет, до +0,7 дБ | меняется |
-| Худшая частота в моно | 0,00 дБ | 0,00 дБ | −19,7 дБ |
-| Худший момент в моно (громкие места) | 0,00 дБ | 0,00 дБ (соло-808 в PHANTOM: −0,3) | −16 дБ |
-| Стерео громче моно, по полосам | ≤ 1,5 дБ | ≤ 1,5 дБ | 5,2 дБ |
-
-Задержка около 150 мс, DAW компенсирует её автоматически.
-
-## Сборка из исходников
-
-Каждый push в `main` собирает плагин в GitHub Actions (Mac + Windows), прогоняет тест моно-контракта, собирает установщики и публикует релиз.
-
-Локально на Mac: `bash build_mac.sh` (поставит cmake, скачает JUCE, соберёт и установит).
-
-Тест моно-контракта без JUCE (Linux/Mac/Windows):
-```
-cmake -B build -DSS_ONLY_TESTS=ON && cmake --build build
-./build/SafeSideContractTest
-```
-
-## Устройство кода
-
-- `Source/dsp/Engine.h` — движок: M/S, шесть характеров, MONO KEEP, Mono Guard, Width.
-- `Source/dsp/Analyzer.h` — потоковый анализ середины: тональное / атаки / шум (STFT, медианные фильтры), PRISM.
-- `Source/dsp/Projector.h` — проекция «никогда не вычитать» для MONO KEEP (три сдвинутые сетки).
-- `Source/dsp/Characters.h`, `Kernels.h`, `Basics.h` — характеры, ядра декорреляции и отражений, фильтры, FFT.
-- `Source/PluginProcessor.*` — параметры, задержка, bypass с той же задержкой, сохранение.
-- `Source/PluginEditor.*`, `Theme.h`, `Tooltips.h` — интерфейс BOBA и подсказки.
-- `tests/contract_test.cpp` — проверка моно-контракта, `tests/render.cpp` — офлайн-рендер, `tests/host_test.cpp` — загрузка VST3 как в DAW.
-
-Построено на JUCE 8 (AGPLv3 / коммерческая лицензия). Шрифт Figtree — SIL Open Font License.
-
-#!/bin/bash
-# Установка готовой сборки (из GitHub Actions). Двойной клик или: bash install_mac.command
-cd "$(dirname "$0")"
-mkdir -p ~/Library/Audio/Plug-Ins/VST3 ~/Library/Audio/Plug-Ins/Components
-rm -rf ~/Library/Audio/Plug-Ins/VST3/"SAFE-SIDE.vst3" ~/Library/Audio/Plug-Ins/Components/"SAFE-SIDE.component"
-cp -R "SAFE-SIDE.vst3" ~/Library/Audio/Plug-Ins/VST3/
-cp -R "SAFE-SIDE.component" ~/Library/Audio/Plug-Ins/Components/
-xattr -cr ~/Library/Audio/Plug-Ins/VST3/"SAFE-SIDE.vst3" ~/Library/Audio/Plug-Ins/Components/"SAFE-SIDE.component"
-codesign --force --deep --sign - ~/Library/Audio/Plug-Ins/VST3/"SAFE-SIDE.vst3"
-codesign --force --deep --sign - ~/Library/Audio/Plug-Ins/Components/"SAFE-SIDE.component"
-killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
-echo "Установлено. Перезапусти Ableton и сделай Rescan плагинов. SAFE-SIDE будет у производителя BOBA."
+            Zip-архивы — то же самое для ручной установки / the zips are the same plug-in for manual install.
+          files: |
+            dist/*-Mac-Installer.pkg
+            dist/*-Windows-Setup.exe
+            dist/BOBA-SafeSide-macOS.zip
+            dist/BOBA-SafeSide-Windows.zip
