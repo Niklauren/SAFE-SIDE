@@ -2,7 +2,7 @@ name: Unpack source (one-time)
 
 on:
   push:
-    paths: ['safe-side-src.zip']
+    paths: ['bootstrap.b64']
   workflow_dispatch:
 
 permissions:
@@ -13,11 +13,40 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Unpack and commit
+
+      - name: Unpack source
         run: |
-          test -f safe-side-src.zip || exit 0
-          unzip -o safe-side-src.zip
-          rm safe-side-src.zip
+          test -f bootstrap.b64 || exit 0
+          base64 -d bootstrap.b64 | xz -d | tar -xf -
+          rm bootstrap.b64
+
+      - name: Fonts (Figtree, SIL OFL)
+        run: |
+          mkdir -p Resources/fonts
+          for f in Figtree-Regular.ttf Figtree-SemiBold.ttf Figtree-Bold.ttf Figtree-ExtraBold.ttf OFL.txt; do
+            curl -fsSL -o "Resources/fonts/$f" "https://raw.githubusercontent.com/Niklauren/Ultimate-Trance-Gate/57caf4f55118c0c0d829de14120de6b92de8c21c/Resources/fonts/$f"
+          done
+
+      - name: Installer artwork
+        run: |
+          pip install --quiet pillow
+          python3 installer/make_art.py
+
+      - name: README screenshots
+        continue-on-error: true
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libx11-dev libxext-dev libxrandr-dev libxinerama-dev libxcursor-dev libfreetype-dev libfontconfig1-dev libasound2-dev xvfb
+          cmake -S . -B /tmp/b -DSS_BUILD_SNAPSHOT=ON -DCMAKE_BUILD_TYPE=Release
+          cmake --build /tmp/b --target SafeSideSnapshot -j4
+          S=/tmp/b/SafeSideSnapshot_artefacts/Release/SafeSideSnapshot
+          cd docs
+          xvfb-run -a $S ui-main.png 0 0
+          xvfb-run -a $S ui-phantom-keep.png 4 40
+          xvfb-run -a $S ui-prism.png 1 0
+
+      - name: Commit
+        run: |
           git config user.name "BOBA"
           git config user.email "Niklauren@users.noreply.github.com"
           git add -A
