@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- productbuild distribution for BOBA SAFE-SIDE. @VERSION@ is replaced by build_pkg.sh. -->
+<installer-gui-script minSpecVersion="2">
+    <title>BOBA SAFE-SIDE @VERSION@</title>
+    <organization>com.boba</organization>
+    <domains enable_localSystem="true" enable_currentUserHome="false" enable_anywhere="false"/>
+    <options customize="allow" require-scripts="false" hostArchitectures="arm64,x86_64" rootVolumeOnly="true"/>
+    <os-version min="11.0"/>
+    <welcome file="welcome.html" mime-type="text/html"/>
+    <conclusion file="conclusion.html" mime-type="text/html"/>
+    <background file="background.png" alignment="bottomleft" scaling="none"/>
+    <background-darkAqua file="background.png" alignment="bottomleft" scaling="none"/>
+
+    <choices-outline>
+        <line choice="vst3"/>
+        <line choice="au"/>
+    </choices-outline>
+
+    <choice id="vst3" title="VST3" description="SAFE-SIDE.vst3 → /Library/Audio/Plug-Ins/VST3 (Ableton Live, FL Studio, Cubase, Bitwig, Reaper…)">
+        <pkg-ref id="com.boba.safeside.vst3"/>
+    </choice>
+    <choice id="au" title="Audio Unit (AU)" description="SAFE-SIDE.component → /Library/Audio/Plug-Ins/Components (Logic Pro, GarageBand, Ableton Live)">
+        <pkg-ref id="com.boba.safeside.au"/>
+    </choice>
+
+    <pkg-ref id="com.boba.safeside.vst3" version="@VERSION@" onConclusion="none">vst3.pkg</pkg-ref>
+    <pkg-ref id="com.boba.safeside.au" version="@VERSION@" onConclusion="none">au.pkg</pkg-ref>
+</installer-gui-script>

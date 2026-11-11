@@ -1,0 +1,5 @@
+build/
+build-mac/
+test-output/
+.DS_Store
+*.zip

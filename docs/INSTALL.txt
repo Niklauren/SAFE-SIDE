@@ -1,0 +1,51 @@
+BOBA · SAFE-SIDE  ·  stereo width that never steals the mono
+============================================================
+
+----------------------------------------------------------------------------------
+РУССКИЙ
+----------------------------------------------------------------------------------
+MAC (Apple Silicon и Intel, VST3 + AU)
+ 1. Распакуй архив.
+ 2. Дважды кликни install_mac.command.
+    Если macOS пишет «не удаётся проверить разработчика»: правый клик по файлу ->
+    Открыть -> Открыть. На macOS 15 и новее: Системные настройки ->
+    Конфиденциальность и безопасность -> внизу «Всё равно открыть».
+ 3. Перезапусти DAW и пересканируй плагины.
+    Ableton: Settings -> Plug-ins -> включи «Use VST3 Plug-in System Folders» и
+    «Use Audio Units» -> Rescan. Плагин будет у производителя BOBA.
+
+ Вручную: скопируй «SAFE-SIDE.vst3» в ~/Library/Audio/Plug-Ins/VST3,
+ «SAFE-SIDE.component» в ~/Library/Audio/Plug-Ins/Components, затем в Терминале:
+   xattr -cr ~/Library/Audio/Plug-Ins/VST3/"SAFE-SIDE.vst3"
+   xattr -cr ~/Library/Audio/Plug-Ins/Components/"SAFE-SIDE.component"
+
+WINDOWS (VST3)
+ 1. Распакуй архив.
+ 2. Скопируй папку «SAFE-SIDE.vst3» в C:\Program Files\Common Files\VST3
+ 3. Пересканируй плагины в DAW.
+
+КАК ПОЛЬЗОВАТЬСЯ
+ Повесь SAFE-SIDE на пэд, вокал, синт, 808 или на мастер.
+ Выбери характер (AIR, PRISM, TWIN, SHINE, PHANTOM, SPACE) и крути AMOUNT.
+ MONO KEEP = 0: моно на выходе в точности равно моно на входе.
+ MONO CHECK — послушать в моно. Наведи мышь на любую ручку — появится подсказка.
+ Задержка ~150 мс, DAW компенсирует её сам.
+
+----------------------------------------------------------------------------------
+ENGLISH
+----------------------------------------------------------------------------------
+MAC (Apple Silicon + Intel, VST3 + AU)
+ 1. Unzip.
+ 2. Double-click install_mac.command
+    If macOS blocks it: right-click the file -> Open -> Open. On macOS 15+:
+    System Settings -> Privacy & Security -> scroll down -> "Open Anyway".
+ 3. Restart your DAW and rescan plug-ins. SAFE-SIDE is listed under BOBA.
+
+WINDOWS (VST3)
+ 1. Unzip.
+ 2. Copy "SAFE-SIDE.vst3" into C:\Program Files\Common Files\VST3
+ 3. Rescan plug-ins in your DAW.
+
+Pick a character, turn AMOUNT. With MONO KEEP at 0 the mono sum is exactly the input.
+Latency is about 150 ms and is compensated by the DAW.
+Font: Figtree (SIL Open Font License).

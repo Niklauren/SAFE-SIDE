@@ -1,0 +1,29 @@
+#!/bin/bash
+# Runs as root after each component (VST3 / AU) is installed into /Library/Audio/Plug-Ins.
+# $2 = install location of this component package.
+
+LOC="$2"
+NAME="SAFE-SIDE"
+
+for p in "$LOC/$NAME.vst3" "$LOC/$NAME.component"; do
+    [ -e "$p" ] || continue
+    xattr -cr "$p" 2>/dev/null || true
+    codesign --force --deep --sign - "$p" >/dev/null 2>&1 || true
+done
+
+# An older install from install_mac.command lives in the user's own Library and would show
+# up twice in the DAW. Remove those copies for the logged-in user.
+CONSOLE_USER=$(stat -f%Su /dev/console 2>/dev/null)
+if [ -n "$CONSOLE_USER" ] && [ "$CONSOLE_USER" != "root" ]; then
+    USER_HOME=$(dscl . -read "/Users/$CONSOLE_USER" NFSHomeDirectory 2>/dev/null | awk '{print $2}')
+    if [ -n "$USER_HOME" ] && [ -d "$USER_HOME/Library/Audio/Plug-Ins" ]; then
+        case "$LOC" in
+            */VST3)       rm -rf "$USER_HOME/Library/Audio/Plug-Ins/VST3/$NAME.vst3" ;;
+            */Components) rm -rf "$USER_HOME/Library/Audio/Plug-Ins/Components/$NAME.component" ;;
+        esac
+    fi
+fi
+
+# Make Logic / GarageBand / Ableton re-read Audio Units.
+killall -9 AudioComponentRegistrar >/dev/null 2>&1 || true
+exit 0
